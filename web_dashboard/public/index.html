@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <title>Trading Dashboard</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1>📊 Paper Trading Dashboard</h1>
+
+<div class="cards">
+  <div class="card">
+    <h3>Balance</h3>
+    <p id="balance">$0</p>
+  </div>
+  <div class="card">
+    <h3>PnL</h3>
+    <p id="pnl">$0</p>
+  </div>
+  <div class="card">
+    <h3>Winrate</h3>
+    <p id="wr">0%</p>
+  </div>
+</div>
+
+<h2>Trades</h2>
+<table>
+  <thead>
+    <tr>
+      <th>ID</th>
+      <th>Side</th>
+      <th>PnL</th>
+      <th>Entry</th>
+      <th>Exit</th>
+      <th>Reason</th>
+    </tr>
+  </thead>
+  <tbody id="trades"></tbody>
+</table>
+
+<script src="app.js"></script>
+</body>
+</html>
