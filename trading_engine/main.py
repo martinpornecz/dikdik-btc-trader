@@ -54,10 +54,19 @@ PRE_SETTLE_FACTOR  = 0.97  # Abschlag auf Marktpreis beim Pre-Settlement Exit
 POLL_INTERVAL      = 2.0
 
 # Ausgabe-Dateien (im selben Verzeichnis wie dieses Script)
-TRADE_LOG_FILE  = "paper_trades.csv"
-STATE_FILE      = "paper_state.json"   # Persistiert den Portfolio-Stand
+TRADE_LOG_FILE  = "./logs/paper_trades.csv"
+STATE_FILE      = "./logs/paper_state.json"   # Persistiert den Portfolio-Stand
 
 VERBOSE = True
+
+# Neue Filter
+CONSENSUS_LOOKBACK = 5
+CONSENSUS_MIN_AGREE = 3
+
+MIN_EDGE = 0.02
+MIN_MODEL_PROB = 0.60
+
+MIN_WAIT_AFTER_EXIT = 180  # Sekunden (Cooldown)
 # ═════════════════════════════════════════════════════════════════════════
 
 
@@ -241,6 +250,10 @@ class PaperPortfolio:
         }
         self.trades.append(trade)
         self.open_pos = None
+
+        # 👉 NEU: Cooldown merken
+        self.last_exit_ts = time.time()
+
         self.save()
         return trade
 
@@ -261,37 +274,83 @@ def log_trade(trade):
             w.writeheader()
         w.writerow(trade)
 
+# --- Helper-Funktionen ----------------------
+def consensus_signal(rows, min_agree=3):
+    ups = 0
+    downs = 0
+
+    for r in rows:
+        rec = parse_recommendation(_s(r, "recommendation"))
+        if rec["action"] == "ENTER":
+            if rec["side"] == "UP":
+                ups += 1
+            elif rec["side"] == "DOWN":
+                downs += 1
+
+    if ups >= min_agree:
+        return "UP"
+    if downs >= min_agree:
+        return "DOWN"
+    return None
+
+
+def simple_trend(rows):
+    """Einfaches Momentum basierend auf model_up."""
+    values = [_f(r, "model_up") or 0 for r in rows]
+    return values[-1] - values[0]
+
+
+def get_edge(row, side):
+    return _f(row, "edge_up" if side == "UP" else "edge_down") or 0
 
 # ─── Entry / Exit Logik ───────────────────────────────────────────────────
 def should_enter(row, port):
-    """Gibt (enter: bool, side: str, price: float) zurueck."""
     if port.open_pos:
         return False, "", 0.0
+
+    now_ts = time.time()
+
+    # Cooldown check
+    if hasattr(port, "last_exit_ts") and port.last_exit_ts:
+        if now_ts - port.last_exit_ts < MIN_WAIT_AFTER_EXIT:
+            return False, "", 0.0
 
     rec = parse_recommendation(_s(row, "recommendation"))
 
     if rec["action"] != "ENTER":
         return False, "", 0.0
 
-    if rec["strength"] not in ALLOWED_STRENGTHS:
-        return False, "", 0.0
-
-    if rec["phase"] not in ALLOWED_PHASES:
-        return False, "", 0.0
-
     side = rec["side"]
-    if side == "UP":
-        model_prob = _f(row, "model_up") or 0
-        price      = _f(row, "mkt_up")
-    elif side == "DOWN":
-        model_prob = _f(row, "model_down") or 0
-        price      = _f(row, "mkt_down")
-    else:
+
+    # Letzte N Reihen holen
+    recent_rows = read_last_n_rows(SIGNALS_CSV, CONSENSUS_LOOKBACK)
+    if len(recent_rows) < CONSENSUS_LOOKBACK:
         return False, "", 0.0
 
+    # 1. Consensus
+    consensus = consensus_signal(recent_rows, CONSENSUS_MIN_AGREE)
+    if consensus != side:
+        return False, "", 0.0
+
+    # 2. Model Probability
+    model_prob = _f(row, "model_up" if side == "UP" else "model_down") or 0
     if model_prob < MIN_MODEL_PROB:
         return False, "", 0.0
 
+    # 3. Edge
+    edge = get_edge(row, side)
+    if edge < MIN_EDGE:
+        return False, "", 0.0
+
+    # 4. Trend
+    trend = simple_trend(recent_rows)
+    if side == "UP" and trend < 0:
+        return False, "", 0.0
+    if side == "DOWN" and trend > 0:
+        return False, "", 0.0
+
+    # 5. Preis validieren
+    price = _f(row, "mkt_up" if side == "UP" else "mkt_down")
     if not price or price <= 0 or price >= 1:
         return False, "", 0.0
 
@@ -416,6 +475,7 @@ def main():
 
     port = PaperPortfolio()
     port.load()  # Vorherigen Zustand laden (falls vorhanden)
+    port.save()
 
     last_processed_ts = None
     csv_missing_warned = False

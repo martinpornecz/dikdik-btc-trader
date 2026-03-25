@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <title>Trading Dashboard</title>
   <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
 
@@ -23,6 +24,15 @@
     <p id="wr">0%</p>
   </div>
 </div>
+
+
+  <h2>📈 Equity Curve</h2>
+  <div class="chart-container">
+  <canvas id="equityChart"></canvas>
+</div>
+
+<h2>🟡 Open Position</h2>
+<div id="position" class="card"></div>
 
 <h2>Trades</h2>
 <table>

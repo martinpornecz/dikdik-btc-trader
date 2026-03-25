@@ -5,8 +5,8 @@ import os
 
 app = Flask(__name__, static_folder="public")
 
-STATE_FILE = "./trading_engine/paper_state.json"
-TRADES_FILE = "./trading_engine/paper_trades.csv"
+STATE_FILE = "./trading_engine/logs/paper_state.json"
+TRADES_FILE = "./trading_engine/logs/paper_trades.csv"
 
 
 # ─── API: State ─────────────────────────────────
@@ -32,6 +32,16 @@ def get_trades():
 
     return jsonify(list(reversed(trades)))
 
+# ─── API: Positionen ────────────────────────────────
+@app.route("/api/position")
+def get_position():
+    if not os.path.exists(STATE_FILE):
+        return jsonify(None)
+
+    with open(STATE_FILE) as f:
+        data = json.load(f)
+
+    return jsonify(data.get("open_pos"))
 
 # ─── Frontend ───────────────────────────────────
 @app.route("/")
@@ -45,4 +55,4 @@ def static_files(path):
 
 
 if __name__ == "__main__":
-    app.run(port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=True)
