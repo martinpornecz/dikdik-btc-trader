@@ -35,6 +35,7 @@ function createRow(t) {
     <td>${t.id}</td>
     <td>${t.side}</td>
     <td class="${cls}">${pnl.toFixed(2)}</td>
+    <td>${t.cost}</td>
     <td>${t.entry_price}</td>
     <td>${t.exit_price}</td>
     <td>${t.reason}</td>

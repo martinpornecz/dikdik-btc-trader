@@ -44,7 +44,7 @@ ORDER_SIZE_USD  = 5.0     # Einsatz pro Trade in USD
 # Entry-Filter: Nur handeln wenn diese Bedingungen erfüllt sind
 ALLOWED_STRENGTHS  = {"STRONG", "GOOD"}   # aus recommendation-Feld
 ALLOWED_PHASES     = {"EARLY", "MID"}     # LATE wird übersprungen
-MIN_MODEL_PROB     = 0.57                 # model_up oder model_down muss >= dieser Wert sein
+MIN_MODEL_PROB     = 0.55                 # model_up oder model_down muss >= dieser Wert sein
 
 # Exit-Logik
 PRE_SETTLE_MIN     = 2.0   # Unter X Minuten -> Pre-Settlement Exit
@@ -59,14 +59,22 @@ STATE_FILE      = "./logs/paper_state.json"   # Persistiert den Portfolio-Stand
 
 VERBOSE = True
 
-# Neue Filter
+# Entry-Filter
 CONSENSUS_LOOKBACK = 5
 CONSENSUS_MIN_AGREE = 3
 
 MIN_EDGE = 0.02
-MIN_MODEL_PROB = 0.60
 
-MIN_WAIT_AFTER_EXIT = 180  # Sekunden (Cooldown)
+MIN_TIME_LEFT_TO_TRADE = 13.5  # kein Trading ganz am Anfang
+MIN_WAIT_AFTER_EXIT = 60      # Sekunden Cooldown
+
+# Positionsgröße
+MAX_ORDER_SIZE_USD = 2.50
+MIN_ORDER_SIZE_USD = 1.00
+
+# Exit
+TAKE_PROFIT_MULTIPLIER = 1.75
+STOP_LOSS_MULTIPLIER = 0.6   # optional aber sehr empfohlen
 # ═════════════════════════════════════════════════════════════════════════
 
 
@@ -105,6 +113,17 @@ COL = {
     "edge_down":      10,
     "recommendation": 11,
 }
+
+def calculate_position_size(row, side, balance):
+    model_prob = row.get("model_up" if side == "UP" else "model_down", 0) or 0
+    edge = row.get("edge_up" if side == "UP" else "edge_down", 0) or 0
+
+    # Score (0–1)
+    score = (model_prob - 0.5) * 2 + edge * 2
+    score = max(0.0, min(1.0, score))
+
+    size = MIN_ORDER_SIZE_USD + (MAX_ORDER_SIZE_USD - MIN_ORDER_SIZE_USD) * score
+    return min(balance, round(size, 2))
 
 def _f(row, key):
     """Gibt Wert aus Zeile als float, None bei Fehler."""
@@ -210,24 +229,31 @@ class PaperPortfolio:
                    model_up, model_down, time_left, timestamp):
         if self.open_pos:
             return False
-        if ORDER_SIZE_USD > self.balance:
+
+        size = calculate_position_size({
+            "model_up": model_up,
+            "model_down": model_down,
+            "edge_up": mkt_up,
+            "edge_down": mkt_down
+        }, side, self.balance)
+
+        if size <= 0 or size > self.balance:
             return False
-        shares = ORDER_SIZE_USD / price
-        self.balance -= ORDER_SIZE_USD
+
+        shares = size / price
+        self.balance -= size
         self.trade_count += 1
         self.open_pos = {
-            "id":          self.trade_count,
-            "side":        side,
+            "id": self.trade_count,
+            "side": side,
             "entry_price": price,
-            "shares":      shares,
-            "cost":        ORDER_SIZE_USD,
-            "mkt_up":      mkt_up,
-            "mkt_down":    mkt_down,
-            "model_up":    model_up,
-            "model_down":  model_down,
-            "time_left":   time_left,
-            "opened_at":   timestamp,
+            "shares": shares,
+            "cost": size,
+            "model_up": model_up,
+            "model_down": model_down,
+            "opened_at": timestamp,
         }
+
         self.save()
         return True
 
@@ -308,50 +334,63 @@ def should_enter(row, port):
     if port.open_pos:
         return False, "", 0.0
 
-    now_ts = time.time()
-
-    # Cooldown check
-    if hasattr(port, "last_exit_ts") and port.last_exit_ts:
-        if now_ts - port.last_exit_ts < MIN_WAIT_AFTER_EXIT:
-            return False, "", 0.0
-
     rec = parse_recommendation(_s(row, "recommendation"))
+    side = rec["side"]
 
     if rec["action"] != "ENTER":
         return False, "", 0.0
 
-    side = rec["side"]
+    # Zeitfilter (kein FOMO am Anfang)
+    time_left = _f(row, "time_left_min") or 0
+    if time_left > MIN_TIME_LEFT_TO_TRADE:
+        print("[BLOCK] Die Zeit passt nicht.")
+        return False, "", 0.0
 
-    # Letzte N Reihen holen
+    # Cooldown
+    #now_ts = time.time()
+    #if hasattr(port, "last_exit_ts") and port.last_exit_ts:
+    #    if now_ts - port.last_exit_ts < MIN_WAIT_AFTER_EXIT:
+    #        print("Der Cooldown ist")
+    #        return False, "", 0.0
+
+    # Historie holen
     recent_rows = read_last_n_rows(SIGNALS_CSV, CONSENSUS_LOOKBACK)
     if len(recent_rows) < CONSENSUS_LOOKBACK:
+        print("[BLOCK] Historie passt nicht")
         return False, "", 0.0
 
-    # 1. Consensus
-    consensus = consensus_signal(recent_rows, CONSENSUS_MIN_AGREE)
-    if consensus != side:
+    # Consensus
+    if consensus_signal(recent_rows, CONSENSUS_MIN_AGREE) != side:
+        print("[BLOCK] Consensus stimmt nicht überein")
         return False, "", 0.0
 
-    # 2. Model Probability
+    # Model
     model_prob = _f(row, "model_up" if side == "UP" else "model_down") or 0
     if model_prob < MIN_MODEL_PROB:
+        print("[BLOCK] Model stimmt nicht")
         return False, "", 0.0
 
-    # 3. Edge
+    # Edge
     edge = get_edge(row, side)
     if edge < MIN_EDGE:
+        print("[BLOCK] Edge ist nicht ausreichend")
         return False, "", 0.0
 
-    # 4. Trend
-    trend = simple_trend(recent_rows)
-    if side == "UP" and trend < 0:
-        return False, "", 0.0
-    if side == "DOWN" and trend > 0:
+    # Momentum
+    vals = [_f(r, "model_up" if side == "UP" else "model_down") or 0 for r in recent_rows]
+    if vals[-1] < vals[0]:
+        print("[BLOCK] Momentum ist negativ")
         return False, "", 0.0
 
-    # 5. Preis validieren
+    # Stability
+    if max(vals) - min(vals) > 0.03:
+        print("[BLOCK] zu volatil")
+        return False, "", 0.0
+
+    # Preis
     price = _f(row, "mkt_up" if side == "UP" else "mkt_down")
     if not price or price <= 0 or price >= 1:
+        print("[BLOCK] Preis stimmt nicht")
         return False, "", 0.0
 
     return True, side, price
@@ -366,6 +405,18 @@ def should_exit(row, port):
     time_left  = _f(row, "time_left_min") or 99
     side       = pos["side"]
     rec        = parse_recommendation(_s(row, "recommendation"))
+    current_price = _f(row, "mkt_up" if side == "UP" else "mkt_down")
+
+    if current_price:
+        current_value = pos["shares"] * current_price
+
+        # 🟢 TAKE PROFIT
+        if current_value >= pos["cost"] * TAKE_PROFIT_MULTIPLIER:
+            return True, current_price, f"Take-Profit ({TAKE_PROFIT_MULTIPLIER}x)"
+
+        # 🔴 STOP LOSS
+        if current_value <= pos["cost"] * STOP_LOSS_MULTIPLIER:
+            return True, current_price, f"Stop-Loss ({STOP_LOSS_MULTIPLIER}x)"
 
     # Settlement: weniger als 0.5 Minuten
     if time_left <= 0.5:
