@@ -226,7 +226,8 @@ class PaperPortfolio:
         return (wins / len(self.trades)) * 100
 
     def open_trade(self, side, price, mkt_up, mkt_down,
-                   model_up, model_down, time_left, timestamp):
+               model_up, model_down, time_left, timestamp):
+
         if self.open_pos:
             return False
 
@@ -243,6 +244,7 @@ class PaperPortfolio:
         shares = size / price
         self.balance -= size
         self.trade_count += 1
+
         self.open_pos = {
             "id": self.trade_count,
             "side": side,
